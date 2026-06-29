@@ -1,19 +1,48 @@
 require('dotenv').config();
+
+// [CRITICAL-1] Guard: fail fast if API key is missing
+if (!process.env.ANTHROPIC_API_KEY) {
+  console.error('ERROR: ANTHROPIC_API_KEY is not set. Check your .env file.');
+  process.exit(1);
+}
+
 const express = require('express');
 const multer = require('multer');
 const pdfParse = require('pdf-parse');
 const Anthropic = require('@anthropic-ai/sdk');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 
 const app = express();
+
+// [Polish-20] Security headers
+app.use(helmet());
+
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // In-memory session store: sessionId -> { agreementText, analysis }
 const sessions = new Map();
 
+// [CRITICAL-3] Session cleanup on a fixed interval, not per-request
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of sessions) {
+    if (now - session.createdAt > 7200000) sessions.delete(id);
+  }
+}, 30 * 60 * 1000);
+
 app.use(express.json({ limit: '2mb' }));
+
+// [CRITICAL-2] Rate limiting on API routes
+app.use('/api/', rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many requests. Please wait 15 minutes and try again.' }
+}));
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── Scoring system prompt ────────────────────────────────────────────────────
@@ -30,7 +59,10 @@ Dimensions (each rated 1–5):
 - E: Legal Recourse        [Weight 10%] 1=no practical remedy, 5=clear accessible legal remedy
 
 Clause score (out of 10) = (A×0.30 + B×0.20 + C×0.20 + D×0.20 + E×0.10) × 2
-Overall score (out of 100) = average of all clause scores × 10, clamped to 0–100.
+Overall score (out of 100) = average clause_score across clauses WHERE found_in_doc is true, multiplied by 10, clamped to 0–100. Do NOT include clauses with found_in_doc: false in the average — these are gaps, not low scores.
+For clauses with found_in_doc: false, set all scores to: { "A": null, "B": null, "C": null, "D": null, "E": null } and clause_score to null.
+
+[Polish-16] Assign grade based on overall_score: A+=90-100, A=80-89, B+=70-79, B=60-69, C+=50-59, C=40-49, D=25-39, F=0-24.
 
 Identify and score ALL of the following clause types you find in the document. If a clause is not present in the agreement, still include it with found_in_doc: false and note it as a potential gap.
 
@@ -59,8 +91,8 @@ Return ONLY valid JSON with no markdown, no explanation, just the JSON object:
       "category": "<category from list above>",
       "found_in_doc": <true/false>,
       "actual_text": "<direct quote from document, max 80 chars, or null if not found>",
-      "scores": { "A": <1-5>, "B": <1-5>, "C": <1-5>, "D": <1-5>, "E": <1-5> },
-      "clause_score": <0.0-10.0>,
+      "scores": { "A": <1-5 or null>, "B": <1-5 or null>, "C": <1-5 or null>, "D": <1-5 or null>, "E": <1-5 or null> },
+      "clause_score": <0.0-10.0 or null>,
       "readability": "<Easy|Medium|Hard>",
       "plain_english": "<1-2 sentences explaining what this means for the borrower in simple language>",
       "risk_flag": <true/false>,
@@ -96,22 +128,33 @@ Return ONLY valid JSON with no markdown, no explanation, just the JSON object:
 }`;
 
 // ─── JSON truncation repair ───────────────────────────────────────────────────
-// If Claude's output is cut off mid-JSON, close any open arrays/objects so
-// JSON.parse can at least recover the data that arrived.
+// [CRITICAL-5] Improved version — handles mid-string truncation
 function repairTruncatedJson(raw) {
   let s = raw;
+
+  // Close any open string (handles mid-value truncation)
+  const quoteCount = (s.match(/(?<!\\)"/g) || []).length;
+  if (quoteCount % 2 !== 0) s += '"';
+
   // Remove trailing incomplete key-value (e.g. , "key": <cut>)
   s = s.replace(/,\s*"[^"]*"\s*:\s*[^,}\]]*$/, '');
+
   // Remove trailing comma
   s = s.replace(/,\s*$/, '');
-  // Close open structures in reverse order
+
+  // Close open structures in reverse order, skipping string contents
   const stack = [];
-  for (const ch of s) {
+  let inString = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '"' && (i === 0 || s[i - 1] !== '\\')) inString = !inString;
+    if (inString) continue;
     if (ch === '{') stack.push('}');
     else if (ch === '[') stack.push(']');
     else if (ch === '}' || ch === ']') stack.pop();
   }
   s += stack.reverse().join('');
+
   try {
     return JSON.parse(s);
   } catch {
@@ -129,7 +172,12 @@ app.post('/api/analyze', upload.single('pdf'), async (req, res) => {
     try {
       const pdfData = await pdfParse(req.file.buffer);
       text = pdfData.text;
-    } catch {
+    } catch (pdfErr) {
+      // [Reliability-11] Specific error for password-protected PDFs
+      const msg = pdfErr.message || '';
+      if (msg.toLowerCase().includes('encrypt') || msg.toLowerCase().includes('password')) {
+        return res.status(400).json({ error: 'This PDF is password-protected. Remove the password and try again.' });
+      }
       return res.status(400).json({ error: 'Could not read PDF. Ensure it is a text-based PDF (not a scanned image).' });
     }
 
@@ -137,7 +185,6 @@ app.post('/api/analyze', upload.single('pdf'), async (req, res) => {
       return res.status(400).json({ error: 'PDF appears to be a scanned image. Please use a text-based PDF.' });
     }
 
-    // Cap input to keep output tokens manageable
     const truncated = text.slice(0, 40000);
 
     const response = await client.messages.create({
@@ -149,11 +196,9 @@ app.post('/api/analyze', upload.single('pdf'), async (req, res) => {
 
     const raw = response.content[0].text;
 
-    // Extract JSON block from response
     const match = raw.match(/\{[\s\S]*\}/);
     if (!match) throw new Error('Model did not return valid JSON');
 
-    // Attempt parse; if truncated, try to repair by closing open structures
     let analysis;
     try {
       analysis = JSON.parse(match[0]);
@@ -161,18 +206,12 @@ app.post('/api/analyze', upload.single('pdf'), async (req, res) => {
       analysis = repairTruncatedJson(match[0]);
     }
 
-    // Store session for follow-up chat
     const sessionId = uuidv4();
     sessions.set(sessionId, {
-      agreementText: truncated.slice(0, 15000), // keep top 15k for chat context
+      agreementText: truncated.slice(0, 15000),
       analysis,
       createdAt: Date.now()
     });
-
-    // Clean old sessions (older than 2 hours)
-    for (const [id, session] of sessions) {
-      if (Date.now() - session.createdAt > 7200000) sessions.delete(id);
-    }
 
     res.json({ sessionId, analysis });
 
@@ -192,8 +231,9 @@ app.post('/api/chat', async (req, res) => {
       ? `Agreement excerpt:\n${session.agreementText}\n\nOverall score: ${session.analysis.overall_score}/100. Top risks: ${session.analysis.top_risks?.map(r => r.title).join(', ')}.`
       : 'No agreement loaded — answer based on general Indian home loan knowledge.';
 
+    // [CRITICAL-8] history from client excludes current question; server appends it here
     const messages = [
-      ...(history || []).slice(-6), // keep last 6 turns for context
+      ...(history || []).slice(-6),
       { role: 'user', content: question }
     ];
 

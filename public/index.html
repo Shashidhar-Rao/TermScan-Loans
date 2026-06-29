@@ -159,8 +159,8 @@ tr:hover td { background: #ffffff05; }
 /* Upload new */
 #new-analysis-btn { display: none; }
 
-/* Responsive */
-@media (max-width: 680px) {
+/* [Polish-10] Mobile breakpoint */
+@media (max-width: 480px) {
   .score-hero { grid-template-columns: 1fr; text-align: center; }
   .score-actions { flex-direction: row; }
   .score-meta { justify-content: center; }
@@ -205,6 +205,8 @@ tr:hover td { background: #ffffff05; }
         <div class="loading-step" id="step-4">⚠️ Flagging risks</div>
         <div class="loading-step" id="step-5">✍️ Writing plain-English explanations</div>
       </div>
+      <!-- [Reliability-6] Elapsed timer -->
+      <div id="elapsed-timer" style="font-size:12px;color:var(--text3);margin-top:8px"></div>
     </div>
   </div>
 
@@ -270,12 +272,14 @@ tr:hover td { background: #ffffff05; }
 
     <!-- Clauses Tab -->
     <div class="tab-pane" id="tab-clauses">
-      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;" id="clause-filters">
+      <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;" id="clause-filters">
         <button class="btn btn-ghost" style="font-size:11px" onclick="filterClauses('all')">All</button>
         <button class="btn btn-red" style="font-size:11px" onclick="filterClauses('risk')">🚩 Risks Only</button>
         <button class="btn btn-ghost" style="font-size:11px" onclick="filterClauses('hard')">Hard to Read</button>
         <button class="btn btn-ghost" style="font-size:11px" onclick="filterClauses('missing')">Not Found</button>
       </div>
+      <!-- [Polish-17] Clause count display -->
+      <div id="clause-count" style="font-size:12px;color:var(--text2);margin-bottom:8px"></div>
       <div class="clause-table-wrap">
         <table>
           <thead>
@@ -309,12 +313,10 @@ tr:hover td { background: #ffffff05; }
 
         <div class="voice-panel">
           <h3>💬 Ask Questions about your Agreement</h3>
-          <div class="chat-history" id="chat-history">
-            <div class="msg msg-ai">Hi! I've analyzed your loan agreement. Ask me anything — I'll explain it in plain English. You can type or use the microphone. <button class="speak-btn" onclick="speakText(this.previousSibling.textContent)">🔊</button></div>
-          </div>
+          <div class="chat-history" id="chat-history"></div>
           <div style="margin-top:12px;">
             <div class="chat-input-row">
-              <button class="mic-btn" id="mic-btn" onclick="toggleMic()" title="Hold to speak">🎤</button>
+              <button class="mic-btn" id="mic-btn" onclick="toggleMic()" title="Click to speak">🎤</button>
               <input class="chat-input" id="chat-input" placeholder="Type a question, e.g. 'What happens if I miss an EMI?'" onkeydown="if(event.key==='Enter')sendChat()">
               <button class="btn btn-primary" onclick="sendChat()">Send</button>
             </div>
@@ -341,7 +343,7 @@ tr:hover td { background: #ffffff05; }
 </main>
 
 <script>
-// ── State ────────────────────────────────────────────────────────────────────
+// ── State ─────────────────────────────────────────────────────────────────────
 let sessionId = null;
 let analysisData = null;
 let allClauses = [];
@@ -349,6 +351,18 @@ let chatHistory = [];
 let recognition = null;
 let isListening = false;
 let isSpeaking = false;
+let uploadedFilename = null; // [Polish-18]
+
+// ── [CRITICAL-4] XSS escape helper — applied to all Claude output in innerHTML ──
+function esc(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 // ── File Handling ─────────────────────────────────────────────────────────────
 function onDragOver(e) { e.preventDefault(); document.getElementById('upload-zone').classList.add('drag-over'); }
@@ -364,16 +378,27 @@ function onDrop(e) {
 function handleFile(file) {
   if (!file) return;
   if (file.type !== 'application/pdf') { alert('Please upload a PDF file.'); return; }
+  uploadedFilename = file.name; // [Polish-18]
   startAnalysis(file);
 }
 
 // ── Analysis ──────────────────────────────────────────────────────────────────
 function animateLoadingSteps() {
   const steps = ['step-1','step-2','step-3','step-4','step-5'];
+  const labels = ['📖 Extracting text from PDF','🔍 Identifying clauses','⚖️ Scoring each clause (5 dimensions)','⚠️ Flagging risks','✍️ Writing plain-English explanations'];
   let i = 0;
   function next() {
-    if (i > 0) { document.getElementById(steps[i-1]).classList.remove('active'); document.getElementById(steps[i-1]).classList.add('done'); document.getElementById(steps[i-1]).textContent = '✓ ' + document.getElementById(steps[i-1]).textContent.slice(2); }
-    if (i < steps.length) { document.getElementById(steps[i]).classList.add('active'); i++; setTimeout(next, 3500 + Math.random()*1500); }
+    if (i > 0) {
+      const prev = document.getElementById(steps[i-1]);
+      prev.classList.remove('active');
+      prev.classList.add('done');
+      prev.textContent = '✓ ' + labels[i-1].slice(2);
+    }
+    if (i < steps.length) {
+      document.getElementById(steps[i]).classList.add('active');
+      i++;
+      setTimeout(next, 3500 + Math.random() * 1500);
+    }
   }
   next();
 }
@@ -383,6 +408,14 @@ async function startAnalysis(file) {
   document.getElementById('loading').style.display = 'flex';
   document.getElementById('results').style.display = 'none';
   animateLoadingSteps();
+
+  // [Reliability-6] Elapsed timer
+  let elapsedSeconds = 0;
+  const elapsedInterval = setInterval(() => {
+    elapsedSeconds++;
+    const el = document.getElementById('elapsed-timer');
+    if (el) el.textContent = `Analyzing… ${elapsedSeconds}s`;
+  }, 1000);
 
   const formData = new FormData();
   formData.append('pdf', file);
@@ -398,6 +431,10 @@ async function startAnalysis(file) {
     document.getElementById('loading').style.display = 'none';
     document.getElementById('upload-section').style.display = 'block';
     alert('Error: ' + err.message);
+  } finally {
+    clearInterval(elapsedInterval);
+    const el = document.getElementById('elapsed-timer');
+    if (el) el.textContent = '';
   }
 }
 
@@ -425,17 +462,25 @@ function renderResults(d) {
   document.getElementById('score-num').textContent = score;
   document.getElementById('score-num').style.color = color;
 
-  // Grade + verdict
+  // Grade + verdict — textContent is XSS-safe
   document.getElementById('score-grade').textContent = (d.grade || '') + ' — ' + gradeName(d.grade);
   document.getElementById('score-verdict').textContent = d.overall_verdict || '';
 
-  // Meta pills
+  // [CRITICAL-4] Meta pills — esc() applied to all Claude output
   const meta = document.getElementById('score-meta');
   meta.innerHTML = '';
-  if (d.lender_name) meta.innerHTML += `<span class="meta-pill"><strong>Lender:</strong> ${d.lender_name}</span>`;
-  if (d.loan_amount) meta.innerHTML += `<span class="meta-pill"><strong>Amount:</strong> ${d.loan_amount}</span>`;
-  if (d.interest_rate) meta.innerHTML += `<span class="meta-pill"><strong>Rate:</strong> ${d.interest_rate}</span>`;
-  if (d.tenure) meta.innerHTML += `<span class="meta-pill"><strong>Tenure:</strong> ${d.tenure}</span>`;
+  if (d.lender_name)   meta.innerHTML += `<span class="meta-pill"><strong>Lender:</strong> ${esc(d.lender_name)}</span>`;
+  if (d.loan_amount)   meta.innerHTML += `<span class="meta-pill"><strong>Amount:</strong> ${esc(d.loan_amount)}</span>`;
+  if (d.interest_rate) meta.innerHTML += `<span class="meta-pill"><strong>Rate:</strong> ${esc(d.interest_rate)}</span>`;
+  if (d.tenure)        meta.innerHTML += `<span class="meta-pill"><strong>Tenure:</strong> ${esc(d.tenure)}</span>`;
+
+  // [Polish-18] Show uploaded filename
+  if (uploadedFilename) {
+    const fileTag = document.createElement('span');
+    fileTag.className = 'meta-pill';
+    fileTag.innerHTML = `<strong>File:</strong> ${esc(uploadedFilename)}`;
+    meta.appendChild(fileTag);
+  }
 
   // Category scores
   const catEl = document.getElementById('cat-scores');
@@ -446,10 +491,10 @@ function renderResults(d) {
       const pct = (val / 10) * 100;
       catEl.innerHTML += `
         <div class="cat-card">
-          <div class="cat-name">${cat}</div>
+          <div class="cat-name">${esc(cat)}</div>
           <div class="cat-bar-row">
             <div class="cat-bar-wrap"><div class="cat-bar" style="width:0%;background:${c}" data-target="${pct}"></div></div>
-            <div class="cat-score-val" style="color:${c}">${val.toFixed(1)}</div>
+            <div class="cat-score-val" style="color:${c}">${Number(val).toFixed(1)}</div>
           </div>
         </div>`;
     });
@@ -460,39 +505,52 @@ function renderResults(d) {
     }, 150);
   }
 
-  // Positives
+  // [CRITICAL-4] Positives — esc() applied
   const posList = document.getElementById('positives-list');
   posList.innerHTML = (d.positive_aspects || []).map(p =>
-    `<div class="positive-item"><span>✅</span><span>${p}</span></div>`).join('') || '<div style="color:var(--text2);font-size:12px">No notable positives identified.</div>';
+    `<div class="positive-item"><span>✅</span><span>${esc(p)}</span></div>`).join('')
+    || '<div style="color:var(--text2);font-size:12px">No notable positives identified.</div>';
 
-  // Missing
+  // [CRITICAL-4] Missing protections — esc() applied
   const missList = document.getElementById('missing-list');
   missList.innerHTML = (d.missing_protections || []).map(m =>
-    `<div class="missing-item"><span>⚠️</span><span>${m}</span></div>`).join('') || '<div style="color:var(--text2);font-size:12px">No missing protections identified.</div>';
+    `<div class="missing-item"><span>⚠️</span><span>${esc(m)}</span></div>`).join('')
+    || '<div style="color:var(--text2);font-size:12px">No missing protections identified.</div>';
 
-  // Risks
+  // [CRITICAL-4] Risk cards — esc() applied to all fields
   const riskEl = document.getElementById('risk-list');
   riskEl.innerHTML = (d.top_risks || []).map(r => `
-    <div class="risk-card ${r.severity}">
+    <div class="risk-card ${esc(r.severity)}">
       <div class="risk-header">
-        <div class="risk-title">${r.title}</div>
-        <span class="sev-badge sev-${r.severity}">${r.severity} Risk</span>
+        <div class="risk-title">${esc(r.title)}</div>
+        <span class="sev-badge sev-${esc(r.severity)}">${esc(r.severity)} Risk</span>
       </div>
-      <div class="risk-exp">${r.explanation}</div>
-      ${r.quote ? `<div class="risk-quote">"${r.quote}"</div>` : ''}
-      ${r.action ? `<div class="risk-action">→ ${r.action}</div>` : ''}
-    </div>`).join('') || '<div style="color:var(--text2)">No major risks identified.</div>';
+      <div class="risk-exp">${esc(r.explanation)}</div>
+      ${r.quote  ? `<div class="risk-quote">"${esc(r.quote)}"</div>` : ''}
+      ${r.action ? `<div class="risk-action">→ ${esc(r.action)}</div>` : ''}
+    </div>`).join('')
+    || '<div style="color:var(--text2);padding:12px">No major risks identified in this agreement.</div>';
 
   // Clauses
   allClauses = d.clauses || [];
   renderClauseTable(allClauses);
 
-  // Voice summary
+  // Voice summary — textContent is safe
   document.getElementById('voice-summary-box').textContent = d.summary_for_voice || 'Summary not available.';
 
-  // Reset chat
+  // [CRITICAL-8] Reset chat — build welcome node via DOM, no innerHTML injection
   chatHistory = [];
-  document.getElementById('chat-history').innerHTML = `<div class="msg msg-ai">Hi! I've analyzed your loan agreement — it scored <strong>${score}/100</strong>. Ask me anything about it in plain English. <button class="speak-btn" onclick="speakText('Hi! I have analyzed your loan agreement. It scored ${score} out of 100. Ask me anything about it.')">🔊</button></div>`;
+  const chatEl = document.getElementById('chat-history');
+  chatEl.innerHTML = '';
+  const welcomeDiv = document.createElement('div');
+  welcomeDiv.className = 'msg msg-ai';
+  welcomeDiv.textContent = `Hi! I've analyzed your loan agreement — it scored ${score}/100. Ask me anything about it in plain English.`;
+  const speakBtn = document.createElement('button');
+  speakBtn.className = 'speak-btn';
+  speakBtn.textContent = '🔊';
+  speakBtn.onclick = () => speakText(`Hi! I have analyzed your loan agreement. It scored ${score} out of 100. Ask me anything about it.`);
+  welcomeDiv.appendChild(speakBtn);
+  chatEl.appendChild(welcomeDiv);
 }
 
 function gradeName(g) {
@@ -502,32 +560,54 @@ function gradeName(g) {
 
 function renderClauseTable(clauses) {
   const tbody = document.getElementById('clause-tbody');
+
+  // [Reliability-13] Empty state
+  if (!clauses || clauses.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--text2);padding:24px">No clauses were identified. This may not be a home loan agreement, or the document may be too short.</td></tr>`;
+    return;
+  }
+
   tbody.innerHTML = clauses.map(c => {
-    const color = scoreColor(c.clause_score, 10);
+    const hasScore = c.clause_score != null;
+    const color = hasScore ? scoreColor(c.clause_score, 10) : 'var(--text3)';
     const notFound = !c.found_in_doc;
+    // [Reliability-7] esc() on actual_text in title attribute
+    const titleAttr = c.actual_text ? esc(c.actual_text) : '';
     return `
-    <tr class="clause-row ${c.risk_flag ? 'is-risk' : ''} ${c.readability === 'Hard' ? 'is-hard' : ''} ${notFound ? 'is-missing' : ''}" data-category="${c.category}">
+    <tr class="clause-row ${c.risk_flag ? 'is-risk' : ''} ${c.readability === 'Hard' ? 'is-hard' : ''} ${notFound ? 'is-missing' : ''}" data-category="${esc(c.category || '')}">
       <td>
-        <div class="clause-name ${notFound ? 'not-found' : ''}">${c.name}</div>
-        ${c.actual_text ? `<div class="clause-text" title="${c.actual_text}">${c.actual_text}</div>` : notFound ? '<div class="clause-cat">Not found in document</div>' : ''}
+        <div class="clause-name ${notFound ? 'not-found' : ''}">${esc(c.name)}</div>
+        ${c.actual_text ? `<div class="clause-text" title="${titleAttr}">${esc(c.actual_text)}</div>` : notFound ? '<div class="clause-cat">Not found in document</div>' : ''}
       </td>
-      <td><span class="tag tag-blue">${c.category}</span></td>
-      <td><span class="score-pill" style="color:${color};border-color:${color}">${c.clause_score.toFixed(1)}</span></td>
-      <td><span class="read-badge read-${c.readability}">${c.readability}</span></td>
-      <td><div class="plain-eng">${c.plain_english || '—'}</div></td>
-      <td>${c.risk_flag ? `<span title="${c.risk_reason || ''}">🚩</span>` : '<span style="color:var(--text3)">—</span>'}</td>
+      <td><span class="tag tag-blue">${esc(c.category)}</span></td>
+      <td>${hasScore ? `<span class="score-pill" style="color:${color};border-color:${color}">${Number(c.clause_score).toFixed(1)}</span>` : '<span style="color:var(--text3);font-size:11px">—</span>'}</td>
+      <td><span class="read-badge read-${esc(c.readability)}">${esc(c.readability)}</span></td>
+      <td><div class="plain-eng">${esc(c.plain_english) || '—'}</div></td>
+      <td>${c.risk_flag ? `<span title="${esc(c.risk_reason || '')}">🚩</span>` : '<span style="color:var(--text3)">—</span>'}</td>
     </tr>`;
   }).join('');
+
+  filterClauses('all'); // [Polish-17] initialise count
 }
 
+// [Polish-17] Filter with visible count
 function filterClauses(mode) {
   const rows = document.querySelectorAll('.clause-row');
+  let visible = 0;
   rows.forEach(r => {
-    if (mode === 'all') r.style.display = '';
-    else if (mode === 'risk') r.style.display = r.classList.contains('is-risk') ? '' : 'none';
-    else if (mode === 'hard') r.style.display = r.classList.contains('is-hard') ? '' : 'none';
-    else if (mode === 'missing') r.style.display = r.classList.contains('is-missing') ? '' : 'none';
+    let show = true;
+    if (mode === 'risk')    show = r.classList.contains('is-risk');
+    else if (mode === 'hard')    show = r.classList.contains('is-hard');
+    else if (mode === 'missing') show = r.classList.contains('is-missing');
+    r.style.display = show ? '' : 'none';
+    if (show) visible++;
   });
+  const countEl = document.getElementById('clause-count');
+  if (countEl) {
+    countEl.textContent = mode === 'all'
+      ? `Showing all ${rows.length} clauses`
+      : `Showing ${visible} of ${rows.length} clauses`;
+  }
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -546,22 +626,37 @@ function speakText(text, onEnd) {
   utt.lang = 'en-IN';
   utt.rate = 0.92;
   utt.pitch = 1.0;
-  // Prefer Indian English voice if available
-  const voices = window.speechSynthesis.getVoices();
-  const preferred = voices.find(v => v.lang === 'en-IN') || voices.find(v => v.lang.startsWith('en'));
-  if (preferred) utt.voice = preferred;
   isSpeaking = true;
   document.getElementById('stop-btn').style.display = 'inline-flex';
-  document.getElementById('stop-summary-btn').style.display = 'inline-flex';
+  const stopSummaryBtn = document.getElementById('stop-summary-btn');
+  if (stopSummaryBtn) stopSummaryBtn.style.display = 'inline-flex';
   document.getElementById('tts-status').textContent = '🔊 Speaking…';
   utt.onend = () => {
     isSpeaking = false;
     document.getElementById('stop-btn').style.display = 'none';
-    document.getElementById('stop-summary-btn').style.display = 'none';
+    const ssb = document.getElementById('stop-summary-btn');
+    if (ssb) ssb.style.display = 'none';
     document.getElementById('tts-status').textContent = '';
     if (onEnd) onEnd();
   };
-  window.speechSynthesis.speak(utt);
+
+  // [Reliability-9] Async voice loading fix for Chrome
+  function setVoiceAndSpeak(u) {
+    const voices = window.speechSynthesis.getVoices();
+    if (voices.length > 0) {
+      const preferred = voices.find(v => v.lang === 'en-IN') || voices.find(v => v.lang.startsWith('en'));
+      if (preferred) u.voice = preferred;
+      window.speechSynthesis.speak(u);
+    } else {
+      window.speechSynthesis.addEventListener('voiceschanged', () => {
+        const v2 = window.speechSynthesis.getVoices();
+        const preferred = v2.find(v => v.lang === 'en-IN') || v2.find(v => v.lang.startsWith('en'));
+        if (preferred) u.voice = preferred;
+        window.speechSynthesis.speak(u);
+      }, { once: true });
+    }
+  }
+  setVoiceAndSpeak(utt);
 }
 
 function speakSummary() {
@@ -573,12 +668,10 @@ function stopSpeech() {
   if ('speechSynthesis' in window) window.speechSynthesis.cancel();
   isSpeaking = false;
   document.getElementById('stop-btn').style.display = 'none';
-  if (document.getElementById('stop-summary-btn')) document.getElementById('stop-summary-btn').style.display = 'none';
+  const ssb = document.getElementById('stop-summary-btn');
+  if (ssb) ssb.style.display = 'none';
   document.getElementById('tts-status').textContent = '';
 }
-
-// Preload voices
-if ('speechSynthesis' in window) window.speechSynthesis.getVoices();
 
 // ── Speech Recognition (STT) ──────────────────────────────────────────────────
 function toggleMic() {
@@ -612,18 +705,24 @@ function stopListening() {
   document.getElementById('mic-btn').classList.remove('listening');
   document.getElementById('stt-status').textContent = '';
   if (recognition) { try { recognition.stop(); } catch {} recognition = null; }
-  // Auto-send if there's text
   const val = document.getElementById('chat-input').value.trim();
   if (val) setTimeout(sendChat, 300);
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
+// [Polish-19] Build AI messages via DOM — no innerHTML, speak button uses closure
 function appendMsg(role, text) {
   const history = document.getElementById('chat-history');
   const div = document.createElement('div');
   div.className = 'msg msg-' + role;
   if (role === 'ai') {
-    div.innerHTML = text + ` <button class="speak-btn" onclick="speakText(this.previousSibling ? this.previousSibling.textContent : this.parentElement.textContent)">🔊</button>`;
+    const textNode = document.createTextNode(text);
+    div.appendChild(textNode);
+    const btn = document.createElement('button');
+    btn.className = 'speak-btn';
+    btn.textContent = '🔊';
+    btn.onclick = () => speakText(text);
+    div.appendChild(btn);
   } else {
     div.textContent = text;
   }
@@ -631,15 +730,15 @@ function appendMsg(role, text) {
   history.scrollTop = history.scrollHeight;
 }
 
+// [CRITICAL-8] Fixed: history sent to server does NOT include current question
+// Server appends it; history is only updated after response arrives
 async function sendChat() {
   const input = document.getElementById('chat-input');
   const q = input.value.trim();
   if (!q) return;
   input.value = '';
   appendMsg('user', q);
-  chatHistory.push({ role: 'user', content: q });
 
-  // Thinking indicator
   const thinking = document.createElement('div');
   thinking.className = 'msg msg-ai';
   thinking.id = 'thinking-msg';
@@ -657,6 +756,8 @@ async function sendChat() {
     thinking.remove();
     if (!res.ok) throw new Error(data.error);
     const answer = data.answer;
+    // Update history only after successful response
+    chatHistory.push({ role: 'user', content: q });
     chatHistory.push({ role: 'assistant', content: answer });
     appendMsg('ai', answer);
     speakText(answer);
@@ -675,15 +776,15 @@ function quickAsk(q) {
 function resetApp() {
   stopSpeech();
   sessionId = null; analysisData = null; allClauses = []; chatHistory = [];
+  uploadedFilename = null; // [Polish-18]
   document.getElementById('results').style.display = 'none';
   document.getElementById('upload-section').style.display = 'block';
   document.getElementById('new-analysis-btn').style.display = 'none';
   document.getElementById('file-input').value = '';
-  // Reset loading steps
+  const labels = ['📖 Extracting text from PDF','🔍 Identifying clauses','⚖️ Scoring each clause (5 dimensions)','⚠️ Flagging risks','✍️ Writing plain-English explanations'];
   ['step-1','step-2','step-3','step-4','step-5'].forEach((id, i) => {
     const el = document.getElementById(id);
     el.classList.remove('done','active');
-    const labels = ['📖 Extracting text from PDF','🔍 Identifying clauses','⚖️ Scoring each clause (5 dimensions)','⚠️ Flagging risks','✍️ Writing plain-English explanations'];
     el.textContent = labels[i];
   });
 }
