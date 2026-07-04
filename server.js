@@ -17,8 +17,8 @@ const path = require('path');
 
 const app = express();
 
-// [Polish-20] Security headers
-app.use(helmet());
+// [Polish-20] Security headers — CSP disabled since frontend uses inline scripts
+app.use(helmet({ contentSecurityPolicy: false }));
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
